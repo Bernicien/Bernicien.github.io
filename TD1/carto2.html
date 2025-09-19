@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Leaflet </title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="">
+  <style>
+    html,body{height:100%;margin:0}
+    #stage{height:100%}
+    #map { height: 180px; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script>
+    const NCE = [43.7009358, 7.2683912];
+    const TRI_BERM = [[25.774,-80.190],[18.466,-66.118],[32.321,-64.757]];
+
+    const map = L.map("stage", {center: NCE, zoom: 3});
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap"
+    }).addTo(map);
+
+    L.marker(NCE).addTo(map).bindPopup("Nice");
+
+    const tri = L.polygon(TRI_BERM, {color: "red"}).addTo(map).bindPopup("Triangle des Bermudes");
+
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        p => {
+          const u = [p.coords.latitude, p.coords.longitude];
+          L.marker(u).addTo(map).bindPopup("Vous êtes ici").openPopup();
+        }
+      );
+    }
+  </script>
+</body>
+</html>
