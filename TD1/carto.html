@@ -1,11 +1,122 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="UTF-8">
-  <title>Mon site GitHub Pages</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Géolocalisation – Test</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+    body{margin:24px;line-height:1.4}
+    h1{font-size:20px;margin:0 0 16px}
+    .grid{display:grid;grid-template-columns:180px 1fr;gap:6px 12px;margin:12px 0 20px;max-width:680px}
+    .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:0 0 16px;background:#fafafa}
+    .row{display:contents}
+    .key{color:#555}
+    .val{font-weight:600}
+    button{padding:10px 14px;border-radius:10px;border:1px solid #ccc;background:#fff;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .err{color:#b00020;font-weight:600;margin-top:8px;white-space:pre-wrap}
+    .ok{color:#0a7a0a}
+    small{color:#666}
+  </style>
 </head>
 <body>
-  <h1>Bienvenue sur mon site 🎉</h1>
-  <p>Ceci est ma première page avec GitHub Pages.</p>
+  <h1>Géolocalisation (HTML + smartphone)</h1>
+
+  <div class="card">
+    <strong>Mesure unique (getCurrentPosition)</strong>
+    <div class="grid" id="once">
+      <div class="row"><div class="key">Latitude</div><div class="val" id="once-lat">—</div></div>
+      <div class="row"><div class="key">Longitude</div><div class="val" id="once-lon">—</div></div>
+      <div class="row"><div class="key">Altitude</div><div class="val" id="once-alt">—</div></div>
+      <div class="row"><div class="key">Précision (m)</div><div class="val" id="once-acc">—</div></div>
+      <div class="row"><div class="key">Vitesse (m/s)</div><div class="val" id="once-speed">—</div></div>
+      <div class="row"><div class="key">Date</div><div class="val" id="once-date">—</div></div>
+    </div>
+    <button id="btn-once">Obtenir la position</button>
+    <div class="err" id="once-err"></div>
+  </div>
+
+  <div class="card">
+    <strong>Suivi en continu (watchPosition)</strong>
+    <div class="grid" id="watch">
+      <div class="row"><div class="key">Latitude</div><div class="val" id="watch-lat">—</div></div>
+      <div class="row"><div class="key">Longitude</div><div class="val" id="watch-lon">—</div></div>
+      <div class="row"><div class="key">Altitude</div><div class="val" id="watch-alt">—</div></div>
+      <div class="row"><div class="key">Précision (m)</div><div class="val" id="watch-acc">—</div></div>
+      <div class="row"><div class="key">Vitesse (m/s)</div><div class="val" id="watch-speed">—</div></div>
+      <div class="row"><div class="key">Date</div><div class="val" id="watch-date">—</div></div>
+    </div>
+    <button id="btn-start">Démarrer le suivi</button>
+    <button id="btn-stop" disabled>Arrêter</button>
+    <div class="err" id="watch-err"></div>
+    <small id="hint" class="ok"></small>
+  </div>
+
+  <script>
+    const opts = { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 };
+
+    function fmt(n, d=6){ return (n==null || Number.isNaN(n)) ? "—" : Number(n).toFixed(d); }
+    function fmtAlt(n){ return (n==null) ? "—" : Number(n).toFixed(1) + " m"; }
+    function fmtAcc(n){ return (n==null) ? "—" : Number(n).toFixed(1); }
+    function fmtSpeed(n){ return (n==null) ? "—" : Number(n).toFixed(2); }
+    function fmtDate(ts){ return ts ? new Date(ts).toLocaleString() : "—"; }
+    function set(el, v){ document.getElementById(el).textContent = v; }
+    function showPosition(prefix, pos){
+      const c = pos.coords;
+      set(prefix+'-lat', fmt(c.latitude));
+      set(prefix+'-lon', fmt(c.longitude));
+      set(prefix+'-alt', fmtAlt(c.altitude));
+      set(prefix+'-acc', fmtAcc(c.accuracy));
+      set(prefix+'-speed', fmtSpeed(c.speed));
+      set(prefix+'-date', fmtDate(pos.timestamp));
+    }
+    function showError(targetId, err){
+      const map = {
+        1: "Permission refusée.",
+        2: "Position indisponible.",
+        3: "Délai dépassé."
+      };
+      document.getElementById(targetId).textContent = (map[err.code]||"Erreur") + (err.message? " ("+err.message+")": "");
+    }
+
+    const onceBtn = document.getElementById('btn-once');
+    onceBtn.addEventListener('click', ()=>{
+      document.getElementById('once-err').textContent = "";
+      if(!('geolocation' in navigator)){ document.getElementById('once-err').textContent="API non disponible."; return; }
+      navigator.geolocation.getCurrentPosition(
+        p=>showPosition('once', p),
+        e=>showError('once-err', e),
+        opts
+      );
+    });
+
+    let watchId = null;
+    const startBtn = document.getElementById('btn-start');
+    const stopBtn  = document.getElementById('btn-stop');
+
+    startBtn.addEventListener('click', ()=>{
+      document.getElementById('watch-err').textContent = "";
+      if(!('geolocation' in navigator)){ document.getElementById('watch-err').textContent="API non disponible."; return; }
+      if(watchId!=null) return;
+      watchId = navigator.geolocation.watchPosition(
+        p=>{ showPosition('watch', p); },
+        e=>{ showError('watch-err', e); },
+        opts
+      );
+      startBtn.disabled = true; stopBtn.disabled = false;
+      document.getElementById('hint').textContent = "Bouge un peu avec le téléphone pour voir la vitesse/altitude quand disponibles.";
+    });
+
+    stopBtn.addEventListener('click', ()=>{
+      if(watchId!=null){ navigator.geolocation.clearWatch(watchId); watchId=null; }
+      startBtn.disabled = false; stopBtn.disabled = true;
+      document.getElementById('hint').textContent = "";
+    });
+
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+      document.getElementById('once-err').textContent = "Cette page doit être servie en HTTPS pour accéder au GPS.";
+    }
+  </script>
 </body>
 </html>
