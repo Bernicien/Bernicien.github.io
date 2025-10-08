@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TD3 — Exo 1 (Partie 1 + Partie 2)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body { height: 100%; margin: 0; background:#0b0b0f; color:#fff; }
+    #app { width: 100%; height: 100%; }
+    #map { position: fixed; right: 12px; bottom: 12px; width: 360px; height: 260px; z-index: 10; border-radius: 8px; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.159.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    const root = document.getElementById('app');
+
+    // Scene
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0b0f);
+
+    // Camera
+    const camera = new THREE.PerspectiveCamera(60, root.clientWidth / root.clientHeight, 0.1, 100);
+    camera.position.set(0, 0, 3.2);
+    camera.lookAt(0, 0, 0);
+
+    // Renderer
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(root.clientWidth, root.clientHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    root.appendChild(renderer.domElement);
+
+    // Lights
+    const ambientLight = new THREE.AmbientLight(0x404040, 5); scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 5); directionalLight.position.set(10, 5, 5); scene.add(directionalLight);
+    const pointLight = new THREE.PointLight(0x404040, 4); pointLight.position.set(-10, -5, -5); scene.add(pointLight);
+
+    // Earth sphere (radius 1)
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 64, 64),
+      new THREE.MeshPhongMaterial({ color: 0xffffff, shininess: 0 })
+    );
+    scene.add(sphere);
+
+    const baseQ = new THREE.Quaternion();
+const spinAxis = new THREE.Vector3(0, 1, 0);
+const qSpin = new THREE.Quaternion();
+let angle = 0;
+    
+    // Animate
+    function tick(){
+      sphere.rotation.y += 0.001;
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    }
+    tick();
+
+    // Resize
+    window.addEventListener('resize', () => {
+      const w = root.clientWidth, h = root.clientHeight;
+      camera.aspect = w / h; camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+
+    // Texture Earth
+    const loader = new THREE.TextureLoader();
+    loader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/earth_atmos_2048.jpg', function (tex) {
+      sphere.material.map = tex;
+      sphere.material.needsUpdate = true;
+    });
+
+    // Lat/Lon -> Cartesian (Three.js axes)
+    function latLonToCartesian(lat, lon, radius = 1, lift = 0){
+      const phi = (90 - lat) * Math.PI / 180;
+      const theta = (lon + 180) * Math.PI / 180;
+      const r = radius + lift;
+      const x = -r * Math.sin(phi) * Math.cos(theta);
+      const z =  r * Math.sin(phi) * Math.sin(theta);
+      const y =  r * Math.cos(phi);
+      return new THREE.Vector3(x, y, z);
+    }
+
+    // Center Earth so that (lat,lon) faces camera (+Z)
+    function centerEarthAt(lat, lon){
+      const v = latLonToCartesian(lat, lon, 1).normalize();
+      const q = new THREE.Quaternion().setFromUnitVectors(v, new THREE.Vector3(0,0,1));
+      sphere.setRotationFromQuaternion(q);
+    }
+
+    // 3D markers (countries)
+    const markers = new THREE.Group();
+    sphere.add(markers);
+
+    function addFlagCube(lat, lon, flagUrl, name = ''){
+      const pos = latLonToCartesian(lat, lon, 1, 0.03);
+      const cube = new THREE.Mesh(
+        new THREE.BoxGeometry(0.05, 0.03, 0.01),
+        new THREE.MeshBasicMaterial()
+      );
+      cube.position.copy(pos);
+      cube.lookAt(cube.position.clone().multiplyScalar(2));
+      cube.userData = { lat, lon, name };
+      markers.add(cube);
+      if(flagUrl){
+        loader.load(flagUrl, function(tex){
+          cube.material.map = tex;
+          cube.material.needsUpdate = true;
+        });
+      }
+    }
+
+    // Leaflet map (bottom-right)
+    const map = L.map('map', { zoomControl: true }).setView([20, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 6,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    // Leaflet -> 3D: click centers Earth
+    map.on('click', (e) => {
+      centerEarthAt(e.latlng.lat, e.latlng.lng);
+    });
+
+    // Countries in both views
+    async function addCountries(){
+      const res = await fetch('https://restcountries.com/v3.1/all?fields=name,latlng,flags');
+      const all = await res.json();
+      for(const c of all){
+        if(!c.latlng || c.latlng.length < 2) continue;
+        const name = c.name && c.name.common ? c.name.common : '';
+        const lat = c.latlng[0], lon = c.latlng[1];
+        const flagUrl = (c.flags && (c.flags.png || c.flags.svg)) || null;
+        addFlagCube(lat, lon, flagUrl, name);
+        const mk = L.marker([lat, lon]).addTo(map);
+        mk.on('click', () => centerEarthAt(lat, lon));
+      }
+    }
+    addCountries();
+
+    // 3D -> Leaflet: picking
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    renderer.domElement.addEventListener('pointerdown', (e) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const hits = raycaster.intersectObjects(markers.children, false);
+      if(hits.length){
+        const { lat, lon } = hits[0].object.userData;
+        map.setView([lat, lon], Math.max(map.getZoom(), 4));
+      }
+    });
+  </script>
+</body>
+</html>
