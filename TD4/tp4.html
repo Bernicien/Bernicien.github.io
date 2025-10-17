@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Carte + Caméra — Zoom avec la main</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <style>
+    :root { --bg:#0b0f19; --panel:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#60a5fa; }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
+    .app{display:flex;height:100%;gap:10px;padding:10px}
+    .left,.right{flex:1;position:relative;border-radius:14px;overflow:hidden;background:var(--panel);box-shadow:0 10px 30px rgba(0,0,0,.25)}
+    #map{position:absolute;inset:0}
+    .right{display:flex;align-items:center;justify-content:center}
+    .stack{position:relative;width:100%;height:100%}
+    video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+    .hud{position:absolute;left:12px;bottom:12px;background:rgba(17,24,39,.7);backdrop-filter:blur(6px);padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.06);font-size:14px}
+    .chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.35);color:#cfe6ff;font-weight:600}
+    .legend{position:absolute;top:12px;left:12px;display:flex;flex-direction:column;gap:8px}
+    .legend span{background:rgba(17,24,39,.7);padding:6px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.06);font-size:12px;color:var(--muted)}
+    .status{position:absolute;top:12px;right:12px}
+    .status .chip{transition:transform .2s ease}
+    .chip.ok{background:rgba(16,185,129,.18);border-color:rgba(16,185,129,.45);color:#d1fae5}
+    .chip.warn{background:rgba(251,191,36,.18);border-color:rgba(251,191,36,.45);color:#fde68a}
+    .chip.err{background:rgba(239,68,68,.18);border-color:rgba(239,68,68,.45);color:#fecaca}
+    /* Rotating wrapper for map */
+    .rotwrap{position:absolute;inset:0;transition:transform .45s ease;transform-origin:center center}
+    .rotwrap.rot90{transform:rotate(90deg)}
+    .rotwrap.rot180{transform:rotate(180deg)}
+    .rotwrap.rot270{transform:rotate(270deg)}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- LEFT: MAP -->
+    <section class="left">
+      <div class="rotwrap" id="rotWrap">
+        <div id="map"></div>
+        <div class="legend">
+          <span>✋ Main ouverte → Dézoomer</span>
+          <span>👊 Poing fermé → Zoomer</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: CAMERA -->
+    <section class="right">
+      <div class="stack">
+        <video id="video" playsinline></video>
+        <canvas id="overlay"></canvas>
+        <div class="hud">
+          <div>Contrôles gestuels : <strong>activés</strong></div>
+          <div style="margin-top:6px;font-size:12px;color:var(--muted)">Conseil : place ta main entière dans le cadre, bien éclairée.</div>
+        </div>
+        <div class="status"><span id="stateChip" class="chip warn">Initialisation…</span></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+  <!-- MediaPipe (legacy, navigateur) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
+
+  <script>
+    // ======= MAP (Leaflet) =======
+    const map = L.map('map', { zoomControl: true, zoomSnap: 0.5, zoomDelta: 0.5 }).setView([48.8566, 2.3522], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    // ======= UI helpers =======
+    const stateChip = document.getElementById('stateChip');
+    const rotWrap = document.getElementById('rotWrap');
+    let rotationQuarterTurns = 0; // 0,1,2,3 → 0°,90°,180°,270°
+
+    function applyRotation(){
+      const classes = ['rot90','rot180','rot270'];
+      rotWrap.classList.remove(...classes);
+      if (rotationQuarterTurns % 4 === 1) rotWrap.classList.add('rot90');
+      else if (rotationQuarterTurns % 4 === 2) rotWrap.classList.add('rot180');
+      else if (rotationQuarterTurns % 4 === 3) rotWrap.classList.add('rot270');
+    }
+
+    function rotateRight90(){
+      rotationQuarterTurns = (rotationQuarterTurns + 1) % 4;
+      applyRotation();
+      setChip('Rotation 90° vers la droite', 'ok');
+    }
+
+    function setChip(text, cls){
+      stateChip.textContent = text;
+      stateChip.className = 'chip ' + (cls||'');
+      stateChip.style.transform = 'scale(1.05)';
+      requestAnimationFrame(()=> stateChip.style.transform = 'scale(1)');
+    }
+
+    // ======= CAMERA + HANDS =======
+    const videoEl = document.getElementById('video');
+    const canvasEl = document.getElementById('overlay');
+    const ctx = canvasEl.getContext('2d');
+
+    // Rate limiting to avoid spamming actions
+    let lastAction = 0;
+    const ACTION_COOLDOWN_MS = 550; // un peu plus strict
+
+    // Smoothing for discrete gestures
+    let lastGesture = 'none';
+    let stableCount = 0;
+    const STABLE_FRAMES = 4;        // zoom
+    const FLIP_STABLE_FRAMES = 6;   // rotation (plus strict)
+
+    // Pinch state for continuous panning
+    let lastPinchPt = null; // in canvas pixels
+    const PAN_GAIN = 1.2;   // higher => map pans more for the same finger motion
+
+    // ======= RUNNER (sprite animé) =======
+    // Remplace SPRITE_URL par l'URL d'un GIF/PNG animé libre de droit
+    const SPRITE_URL = 'https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif'; // placeholder libre, à remplacer par ton sprite de run
+    let runnerMarker = null;
+    let runnerInterval = null;
+    let runnerDisappearTimer = null;
+    let runnerDirRad = 0;
+    const RUNNER_TICK_MS = 120;         // cadence
+    const RUNNER_SPEED_PX = 1.6;        // pixels par tick (ralenti)
+    const RUNNER_DISAPPEAR_MS = 15000;  // 15 s après la DERNIÈRE détection du geste
+
+    function startRunner(atLatLng){
+      stopRunner(false);
+      const icon = L.divIcon({
+        className: '',
+        html: `<img src="${SPRITE_URL}" style="width:36px;height:36px;transform:translate(-50%,-50%);image-rendering:pixelated;">`,
+        iconSize: [36,36], iconAnchor: [18,18]
+      });
+      runnerMarker = L.marker(atLatLng, { icon }).addTo(map);
+      // Direction aléatoire
+      runnerDirRad = Math.random()*Math.PI*2;
+      runnerInterval = setInterval(()=>{
+        if (!runnerMarker) return;
+        const pos = runnerMarker.getLatLng();
+        const p = map.project(pos, map.getZoom());
+        p.x += Math.cos(runnerDirRad) * RUNNER_SPEED_PX;
+        p.y += Math.sin(runnerDirRad) * RUNNER_SPEED_PX;
+        const next = map.unproject(p, map.getZoom());
+        runnerMarker.setLatLng(next);
+      }, RUNNER_TICK_MS);
+      resetRunnerDisappearTimer();
+      setChip('Runner: en course…', 'ok');
+    }
+
+    function resetRunnerDisappearTimer(){
+      if (runnerDisappearTimer) clearTimeout(runnerDisappearTimer);
+      runnerDisappearTimer = setTimeout(()=> stopRunner(true), RUNNER_DISAPPEAR_MS);
+    }
+
+    function stopRunner(remove=true){
+      if (runnerInterval){ clearInterval(runnerInterval); runnerInterval = null; }
+      if (runnerDisappearTimer){ clearTimeout(runnerDisappearTimer); runnerDisappearTimer = null; }
+      if (remove && runnerMarker){ runnerMarker.remove(); runnerMarker = null; setChip('Runner: disparu', 'warn'); }
+    }
+
+    function changeRunnerDirection(){
+      if (!runnerMarker) return;
+      runnerDirRad = Math.random()*Math.PI*2;
+      resetRunnerDisappearTimer();
+      setChip('Runner: nouvelle direction', 'ok');
+    }
+
+    // Finger indices in MediaPipe
+    const TIPS = { thumb:4, index:8, middle:12, ring:16, pinky:20 };
+    const PIPS = { thumb:3, index:6, middle:10, ring:14, pinky:18 };
+    const DIPS = { thumb:0, index:7, middle:11, ring:15, pinky:19 }; // DIP for non-thumb (approx for thumb)
+    const MCPs = { thumb:2, index:5, middle:9, ring:13, pinky:17 };
+
+    const dist = (a,b)=> Math.hypot(a.x-b.x, a.y-b.y);
+
+    function isFingerExtended(landmarks, finger, handedness){
+      if (finger !== 'thumb'){
+        // tip clearly above PIP & DIP
+        return (landmarks[TIPS[finger]].y + 0.01) < landmarks[PIPS[finger]].y &&
+               (landmarks[TIPS[finger]].y + 0.01) < landmarks[DIPS[finger]].y;
+      }
+      // Thumb: compare x relative to MCP depending on handedness
+      if (handedness === 'Left'){
+        return landmarks[TIPS.thumb].x < landmarks[MCPs.thumb].x;
+      } else {
+        return landmarks[TIPS.thumb].x > landmarks[MCPs.thumb].x;
+      }
+    }
+
+    function isFingerFolded(landmarks, finger){
+      const tip = landmarks[TIPS[finger]];
+      const pip = landmarks[PIPS[finger]];
+      const wrist = landmarks[0];
+      const closeToPalm = dist(tip, wrist) < 0.22;
+      return tip.y > (pip.y - 0.005) && closeToPalm;
+    }
+
+    function isPinching(landmarks){
+      const thumbTip = landmarks[TIPS.thumb];
+      const indexTip = landmarks[TIPS.index];
+      const pinchD = dist(thumbTip, indexTip);
+      const palmW = dist(landmarks[MCPs.index], landmarks[MCPs.pinky]);
+      const scale = palmW > 0.01 ? palmW : 0.08;
+      return pinchD < scale * 0.45;
+    }
+
+    function handUpright(landmarks){
+      const wrist = landmarks[0];
+      const midMCP = landmarks[MCPs.middle];
+      const vx = midMCP.x - wrist.x; const vy = midMCP.y - wrist.y;
+      const ang = Math.atan2(vx, -vy);
+      return Math.abs(ang) < (35 * Math.PI/180);
+    }
+
+    function strongMiddleExtended(landmarks){
+      const tip = landmarks[TIPS.middle];
+      const pip = landmarks[PIPS.middle];
+      const length = dist(tip, pip);
+      const palm = dist(landmarks[MCPs.index], landmarks[MCPs.pinky]);
+      return tip.y < pip.y - 0.02 && length > palm * 0.35;
+    }
+
+    function isFlipOff(landmarks, handedness){
+      const mid = strongMiddleExtended(landmarks);
+      const othersFolded = isFingerFolded(landmarks,'index') &&
+                           isFingerFolded(landmarks,'ring') &&
+                           isFingerFolded(landmarks,'pinky') &&
+                           isFingerFolded(landmarks,'thumb');
+      const orientOK = handUpright(landmarks);
+      return mid && othersFolded && orientOK;
+    }
+
+    function isRockSign(landmarks, handedness){
+      // 🤘 index + pinky extended; middle + ring + thumb folded
+      const idx = isFingerExtended(landmarks,'index',handedness);
+      const pky = isFingerExtended(landmarks,'pinky',handedness);
+      const midF = isFingerFolded(landmarks,'middle');
+      const rngF = isFingerFolded(landmarks,'ring');
+      const thbF = isFingerFolded(landmarks,'thumb');
+      // Optionnel: vérifier que index et pinky ne sont pas collés (un peu d'écart)
+      const sep = dist(landmarks[TIPS.index], landmarks[TIPS.pinky]);
+      return idx && pky && midF && rngF && thbF && sep > 0.05;
+    }
+
+    function classifyGesture(results){
+      if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return 'none';
+      const lm = results.multiHandLandmarks[0];
+      const handedness = results.multiHandedness?.[0]?.label || 'Right';
+
+      if (isPinching(lm)) return 'pinch';
+      if (isFlipOff(lm, handedness)) return 'flipoff';
+      if (isRockSign(lm, handedness)) return 'rock';
+
+      const extended = ['thumb','index','middle','ring','pinky'].map(f=>isFingerExtended(lm, f, handedness));
+      const count = extended.filter(Boolean).length;
+
+      if (count >= 4) return 'open';
+      if (count === 0){
+        const wrist = lm[0];
+        const tipAvg = [TIPS.index, TIPS.middle, TIPS.ring, TIPS.pinky]
+          .map(i=>Math.hypot(lm[i].x - wrist.x, lm[i].y - wrist.y))
+          .reduce((a,b)=>a+b,0)/4;
+        if (tipAvg < 0.14) return 'fist';
+      }
+      return 'none';
+    }
+
+    function draw(results){
+      const width = canvasEl.width = videoEl.videoWidth || canvasEl.width;
+      const height = canvasEl.height = videoEl.videoHeight || canvasEl.height;
+      ctx.save();
+      ctx.clearRect(0,0,width,height);
+      // Mirror for more natural control
+      ctx.translate(width, 0); ctx.scale(-1, 1);
+      ctx.drawImage(results.image, 0, 0, width, height);
+      if (results.multiHandLandmarks){
+        for (const landmarks of results.multiHandLandmarks){
+          drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { lineWidth: 3 });
+          drawLandmarks(ctx, landmarks, { lineWidth: 1, radius: 2.5 });
+        }
+      }
+      ctx.restore();
+    }
+
+    function maybeAct(gesture){
+      const now = performance.now();
+      if (gesture === 'open' || gesture === 'fist' || gesture === 'flipoff' || gesture === 'rock'){
+        const requiredFrames = (gesture === 'flipoff') ? FLIP_STABLE_FRAMES : STABLE_FRAMES;
+        if (stableCount < requiredFrames) return;
+        if (now - lastAction < ACTION_COOLDOWN_MS) return;
+
+        if (gesture === 'open'){
+          map.zoomOut(1);
+          setChip('Dézoomer (main ouverte)', 'ok');
+        } else if (gesture === 'fist'){
+          map.zoomIn(1);
+          setChip('Zoomer (poing)', 'ok');
+        } else if (gesture === 'flipoff'){
+          rotateRight90();
+        } else if (gesture === 'rock'){
+          if (!runnerMarker){
+            // spawn dans la vue courante à un endroit aléatoire
+            const b = map.getBounds();
+            const lat = b.getSouth() + Math.random()*(b.getNorth()-b.getSouth());
+            const lng = b.getWest() + Math.random()*(b.getEast()-b.getWest());
+            startRunner([lat,lng]);
+          } else {
+            changeRunnerDirection();
+          }
+        }
+        lastAction = now;
+      }
+    }
+
+    function handlePinch(results){
+      const width = canvasEl.width;
+      const height = canvasEl.height;
+      const lm = results.multiHandLandmarks?.[0];
+      if (!lm) { lastPinchPt = null; return; }
+      const thumbTip = lm[TIPS.thumb];
+      const indexTip = lm[TIPS.index];
+      const cx = (thumbTip.x + indexTip.x) / 2; // normalized [0..1]
+      const cy = (thumbTip.y + indexTip.y) / 2;
+      const px = (1 - cx) * width; // miroir
+      const py = cy * height;
+
+      if (lastPinchPt){
+        const dx = px - lastPinchPt.x;
+        const dy = py - lastPinchPt.y;
+        map.panBy([dx * PAN_GAIN, dy * PAN_GAIN], { animate: false });
+      }
+      lastPinchPt = { x: px, y: py };
+      setChip('Pincement — déplacement', 'ok');
+    }
+
+    async function main(){
+      const legend = document.querySelector('.legend');
+      if (legend){
+        const pinchSpan = document.createElement('span');
+        pinchSpan.textContent = '👌 Pincement pouce-index → Se déplacer sur la carte';
+        legend.appendChild(pinchSpan);
+        const flipSpan = document.createElement('span');
+        flipSpan.textContent = '🖕 Majeur seul (main verticale) → Pivoter 90° à droite';
+        legend.appendChild(flipSpan);
+        const rockSpan = document.createElement('span');
+        rockSpan.textContent = '🤘 Index + auriculaire → Lancer un coureur animé (disparition après 15s)';
+        legend.appendChild(rockSpan);
+      }
+
+      setChip('Initialisation…', 'warn');
+      const hands = new Hands({locateFile: (file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+      hands.setOptions({
+        maxNumHands: 1,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.7,
+        modelComplexity: 1
+      });
+
+      hands.onResults((results)=>{
+        draw(results);
+        const g = classifyGesture(results);
+
+        // Discrete gestures + none
+        if (g === 'open' || g === 'fist' || g === 'flipoff' || g === 'rock' || g === 'none'){
+          if (g === lastGesture){
+            stableCount++;
+          } else {
+            stableCount = 1;
+            lastGesture = g;
+          }
+          maybeAct(g);
+          if (g === 'none') {
+            // si on perd le geste, laisser le runner continuer MAIS programmer disparition 15s
+            resetRunnerDisappearTimer();
+            setChip('Aucun geste détecté', 'warn');
+            lastPinchPt = null;
+          }
+        }
+
+        // Continuous pinch panning
+        if (g === 'pinch'){
+          handlePinch(results);
+          lastGesture = 'pinch';
+          stableCount = 0;
+        } else if (g !== 'pinch'){
+          lastPinchPt = null;
+        }
+      });
+
+      const camera = new Camera(videoEl, {
+        onFrame: async () => { await hands.send({ image: videoEl }); },
+        width: 1280, height: 720
+      });
+      try {
+        await camera.start();
+        setChip('Caméra prête', 'ok');
+      } catch(e){
+        console.error(e);
+        setChip('Autorise la caméra dans le navigateur', 'err');
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>
